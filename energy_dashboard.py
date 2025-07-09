@@ -1,60 +1,79 @@
-#
-from ast import Add
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
-import matplotlib.pyplot as plt
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 import joblib
-
+import os
 
 # -------- Load and preprocess data with caching --------
 @st.cache_data
+@st.cache_data
 def load_data(nrows=100000):
-    # Only load a subset of rows for faster performance; adjust nrows as needed
-    url = "https://drive.google.com/uc?id=1islxIxYjfOt8TXuc5kO5LDGjhA9yt7Ex"  # Put your real file URL here
-    df = pd.read_csv(url, sep=';',
-                     parse_dates={'dt': ['Date', 'Time']},
-                     na_values='?', low_memory=False, nrows=nrows)
+    url = "https://drive.google.com/uc?id=1islxIxYjfOt8TXuc5kO5LDGjhA9yt7Ex"
+    local_csv = "energy_data.csv"
+    # Download from Google Drive if not present
+    if not os.path.exists(local_csv):
+        try:
+            import gdown
+        except ImportError:
+            st.error("gdown is required to download from Google Drive. Please install it with 'pip install gdown'.")
+            st.stop()
+        gdown.download(url, local_csv, quiet=False)
+    df = pd.read_csv(local_csv, sep=';', na_values='?', low_memory=False, nrows=nrows)
+    
+    # Print columns to debug KeyError
+    print("Columns loaded:", df.columns.tolist())
+    # Adjust column names if needed
+    if 'Date' not in df.columns or 'Time' not in df.columns:
+        # Try lower case or strip spaces
+        df.columns = df.columns.str.strip()
+    if 'Date' not in df.columns or 'Time' not in df.columns:
+        st.error(f"CSV columns are: {df.columns.tolist()}. 'Date' and 'Time' columns not found.")
+        st.stop()
+    df['Date_Time'] = pd.to_datetime(df['Date'] + ' ' + df['Time'], format='%d/%m/%Y %H:%M:%S')
+    df['dt'] = df['Date_Time']
+    df.set_index('dt', inplace=True)
+    df.dropna(inplace=True)
 
-    df.dropna(inplace=True)  # Clean missing values early
+    # Ensure index is a DatetimeIndex for time features
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
 
-    # Time features
-    df['hour'] = df['dt'].dt.hour
-    df['minute'] = df['dt'].dt.minute
+    # Time features using index since 'dt' is now the index
+    df['hour'] = df.index.hour
+    df['minute'] = df.index.minute
     df['total_minutes'] = df['hour'] * 60 + df['minute']
-    df['date'] = df['dt'].dt.date
-    df['week'] = df['dt'].dt.isocalendar().week
-    df['month'] = df['dt'].dt.to_period('M').astype(str)
+    df['date'] = df.index.date
+    df['week'] = df.index.isocalendar().week
+    df['month'] = df.index.to_period('M').astype(str)
 
     return df
-
 df = load_data()
 st.info("Loaded a subset of the data for performance. Adjust 'nrows' in load_data() if needed.")
 
 # -------- User inputs --------
-start_date = st.date_input("Start Date", df['dt'].min().date())
-end_date = st.date_input("End Date", df['dt'].max().date())
+start_date = st.date_input("Start Date", df.index.min().date())
+end_date = st.date_input("End Date", df.index.max().date())
 hour_to_view = st.slider("Select Hour of Day", 0, 23, 12)
 
 filtered = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
 hourly_filtered = filtered[filtered['hour'] == hour_to_view]
 
 st.write("Sample of Filtered Data:")
-st.dataframe(hourly_filtered[['dt', 'Global_active_power']].head(10))
+st.dataframe(hourly_filtered.reset_index()[['dt', 'Global_active_power']].head(10))
 
 # -------- Line chart for hourly filtered data --------
-fig = px.line(hourly_filtered, x='dt', y='Global_active_power',
+fig = px.line(hourly_filtered.reset_index(), x='dt', y='Global_active_power',
               title=f"Power Consumption at Hour {hour_to_view}")
 st.plotly_chart(fig)
 
 # -------- Sidebar Info --------
 st.sidebar.header("Data Overview")
 st.sidebar.write(f"Total Records: {len(df)}")
-st.sidebar.write(f"Date Range: {df['dt'].min().date()} to {df['dt'].max().date()}")
+st.sidebar.write(f"Date Range: {df.index.min().date()} to {df.index.max().date()}")
 
 # -------- Interval-based average plot --------
 interval = st.selectbox("Select Interval", ["Day", "Week", "Month"])
@@ -108,7 +127,7 @@ st.header("Realtime Simulation")
 simulation_time = st.slider("Select Time of Day", 0, 1439, 720)
 simulation_df = df[df['total_minutes'] == simulation_time]
 
-fig_simulation = px.line(simulation_df, x='dt', y='Global_active_power',
+fig_simulation = px.line(simulation_df.reset_index(), x='dt', y='Global_active_power',
                          title=f"Power Usage at {simulation_time} minutes")
 st.plotly_chart(fig_simulation)
 
@@ -118,29 +137,28 @@ threshold = df['Global_active_power'].quantile(0.99)
 anomalies = df[df['Global_active_power'] > threshold]
 st.write(f"Anomalies Detected: {len(anomalies)}")
 
-fig_anomaly = px.line(df, x='dt', y='Global_active_power',
+fig_anomaly = px.line(df.reset_index(), x='dt', y='Global_active_power',
                       title="Global Active Power with Anomalies")
-fig_anomaly.add_scatter(x=anomalies['dt'], y=anomalies['Global_active_power'],
+fig_anomaly.add_scatter(x=anomalies.index, y=anomalies['Global_active_power'],
                         mode='markers', marker=dict(color='red', size=6),
                         name='Anomaly')
 st.plotly_chart(fig_anomaly)
 
 # -------- Interactive Filters --------
 st.header("Interactive Filters")
-
 st.sidebar.header("Interactive Filters")
 
-# Clean NaNs just for slider setup
-voltage_clean = df['Voltage'].dropna()
-v_min, v_max = float(voltage_clean.min()), float(voltage_clean.max())
+df_filtered = df.reset_index()  # get 'dt' back as column
 
-# Sidebar filters
+# Sidebar filter values
 hour_of_day = st.sidebar.slider("Hour of Day", 0, 23, (0, 23))
-day_of_week = st.sidebar.multiselect("Day of Week", options=df['dt'].dt.day_name().unique(),
-                                     default=df['dt'].dt.day_name().unique())
-month = st.sidebar.multiselect("Month", options=df['dt'].dt.month_name().unique(),
-                               default=df['dt'].dt.month_name().unique())
-year = st.sidebar.selectbox("Year", options=sorted(df['dt'].dt.year.dropna().unique()))
+day_of_week = st.sidebar.multiselect("Day of Week", options=df_filtered['dt'].dt.day_name().unique(),
+                                     default=df_filtered['dt'].dt.day_name().unique())
+month = st.sidebar.multiselect("Month", options=df_filtered['dt'].dt.month_name().unique(),
+                               default=df_filtered['dt'].dt.month_name().unique())
+year = st.sidebar.selectbox("Year", options=sorted(df_filtered['dt'].dt.year.unique()))
+voltage_clean = df_filtered['Voltage'].dropna()
+v_min, v_max = float(voltage_clean.min()), float(voltage_clean.max())
 voltage_range = st.sidebar.slider("Voltage Range", v_min, v_max, (v_min, v_max))
 
 sub_metering_zone = st.sidebar.multiselect(
@@ -149,26 +167,28 @@ sub_metering_zone = st.sidebar.multiselect(
     default=['Sub_metering_1', 'Sub_metering_2', 'Sub_metering_3']
 )
 
-# Base filtering
-filtered = df[
-    (df['hour'].between(hour_of_day[0], hour_of_day[1])) &
-    (df['dt'].dt.day_name().isin(day_of_week)) &
-    (df['dt'].dt.month_name().isin(month)) &
-    (df['dt'].dt.year == year) &
-    (df['Voltage'].between(voltage_range[0], voltage_range[1]))
+# Filtering
+filtered = df_filtered[
+    (df_filtered['hour'].between(hour_of_day[0], hour_of_day[1])) &
+    (df_filtered['dt'].dt.day_name().isin(day_of_week)) &
+    (df_filtered['dt'].dt.month_name().isin(month)) &
+    (df_filtered['dt'].dt.year == year) &
+    (df_filtered['Voltage'].between(voltage_range[0], voltage_range[1]))
 ]
 
-# Sub-metering filter (only if user selects zones)
 if sub_metering_zone:
     sub_mask = False
     for zone in sub_metering_zone:
         sub_mask |= (filtered[zone] > 0)
     filtered = filtered[sub_mask]
 
-# Output results
-st.subheader("Filtered Data Preview")
-st.write(f"Rows matched: {len(filtered)}")
-st.dataframe(filtered)
+# Output
+if filtered.empty:
+    st.warning("⚠️ No data matched your filter selection. Try relaxing the filters.")
+else:
+    st.subheader("Filtered Data Preview")
+    st.write(f"Rows matched: {len(filtered)}")
+    st.dataframe(filtered)
 
 
 # -------- Machine Learning: Predict Global Active Power --------
@@ -184,7 +204,8 @@ ml_df = df.dropna(subset=[
 ]).copy()
 
 # 3. Feature engineering
-ml_df['day_of_week'] = ml_df['dt'].dt.dayofweek
+ml_df.index = pd.to_datetime(ml_df.index)  # Ensure DatetimeIndex
+ml_df['day_of_week'] = pd.to_datetime(ml_df.index).dayofweek
 ml_df['is_weekend'] = ml_df['day_of_week'].isin([5, 6]).astype(int)
 
 features = [
