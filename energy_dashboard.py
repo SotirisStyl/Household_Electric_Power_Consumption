@@ -15,7 +15,7 @@ import joblib
 @st.cache_data
 def load_data(nrows=100000):
     # Only load a subset of rows for faster performance; adjust nrows as needed
-    url = "https://example.com/path/to/household_power_consumption.txt"  # Put your real file URL here
+    url = "https://drive.google.com/uc?id=1islxIxYjfOt8TXuc5kO5LDGjhA9yt7Ex"  # Put your real file URL here
     df = pd.read_csv(url, sep=';',
                      parse_dates={'dt': ['Date', 'Time']},
                      na_values='?', low_memory=False, nrows=nrows)
